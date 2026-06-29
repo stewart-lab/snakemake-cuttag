@@ -1,0 +1,404 @@
+from pathlib import Path
+import os
+import sys
+from glob import glob
+import re
+import pandas as pd
+
+# ********** read/print inputs from config **********
+CONFIG_YAML_PATH =      workflow.configfiles[0]
+CONFIG_DIR =            os.path.join(os.path.normpath(os.path.dirname(CONFIG_YAML_PATH)), "")
+RESULTS =               os.path.join(os.path.normpath(os.path.join(CONFIG_DIR, config["results_dir"])), "")
+LOGS =                  os.path.join(os.path.normpath(os.path.join(CONFIG_DIR, config["logs_dir"])), "")
+REPORTS_DIR =           os.path.join(os.path.normpath(os.path.join(CONFIG_DIR, config["reports_dir"])), "") if config.get("reports_dir") else ""
+GENOME_DIR =            os.path.join(os.path.normpath(os.path.join(CONFIG_DIR, config["genome_dir"])), "")
+SAMPLESHEET_CSV_PATH =  os.path.normpath(os.path.join(CONFIG_DIR, config["samples"]))
+DESIGN_CSV_PATH =       os.path.normpath(os.path.join(CONFIG_DIR, config["design"]))
+CONTRASTS_CSV_PATH =    os.path.normpath(os.path.join(CONFIG_DIR, config["contrasts"]))
+EXCLUDE_CSV_PATH =      os.path.normpath(os.path.join(CONFIG_DIR, config["exclude"])) if config.get("exclude") else ""
+IGG_CONTROLS_CSV_PATH = os.path.normpath(os.path.join(CONFIG_DIR, config["igg_controls"]))
+CORES =                 config["cores"]
+
+# these are printed to stderr, not stdout, because creating the rulegraph/DAG .png
+# uses output from stdout, and these print statements create problems
+print("\n\n", file=sys.stderr)
+print(f"*** CUT&Tag pipeline ***", file=sys.stderr)
+print(f"  Config dir:      {CONFIG_DIR}", file=sys.stderr)
+print(f"  Results dir:     {RESULTS}", file=sys.stderr)
+print(f"  Reports dir:     {REPORTS_DIR}", file=sys.stderr)
+print(f"  Genome dir:      {GENOME_DIR}", file=sys.stderr)
+print(f"  Samplesheet:     {SAMPLESHEET_CSV_PATH}", file=sys.stderr)
+print(f"  Design matrix:   {DESIGN_CSV_PATH}", file=sys.stderr)
+print(f"  Contrast matrix: {CONTRASTS_CSV_PATH}", file=sys.stderr)
+print(f"  Exclude:         {EXCLUDE_CSV_PATH}", file=sys.stderr)
+print(f"  IgG controls:    {IGG_CONTROLS_CSV_PATH}", file=sys.stderr)
+print("\n\n", file=sys.stderr)
+
+# ********** output directories for each step in the pipeline **********
+STEP_META_DIR =                           RESULTS + "000_meta/"
+STEP_FASTP_DIR =                          RESULTS + "001_fastp_trimmed/"
+STEP_FASTQC_POST_TRIM_DIR =               RESULTS + "002_fastqc/"
+STEP_BOWTIE2_DIR =                        RESULTS + "003_bowtie2/"
+STEP_FILTERED_READS_DIR =                 RESULTS + "004_samtools_filtered/"
+STEP_GOPEAKS_DIR =                        RESULTS + "005_gopeaks/"
+STEP_MULTIQC_DIR =                        RESULTS + "006_multiqc/"
+STEP_CONSENSUS_PEAKS_DIR =                RESULTS + "007_consensus_peaks/"
+STEP_CONSENSUS_PEAKS_ANNOTATED_DIR =      RESULTS + "008_consensus_peaks_annotated/"
+STEP_QC_REPORT_CARDS_DIR =                RESULTS + "009_qc_reports/"
+STEP_RAW_COUNT_MATRIX_DIR =               RESULTS + "010_raw_counts/"
+STEP_RAW_COUNTS_SAMPLES_DROPPED_DIR =     RESULTS + "011_raw_counts_samples_dropped/"
+STEP_RAW_COUNTS_LOW_COUNTS_FILTERED_DIR = RESULTS + "012_raw_counts_filtered/"
+STEP_PCA_ALL_SAMPLES_DIR =                RESULTS + "013_pca/"
+STEP_PCA_SAMPLES_DROPPED_DIR =            RESULTS + "014_pca_samples_dropped/"
+STEP_DESEQ2_DIR =                         RESULTS + "015_deseq2/"
+STEP_GENE_SYMBOLS_DIR =                   RESULTS + "016_deseq2_gene_symbols/"
+STEP_BIGWIGS_DIR =                        RESULTS + "017_bigwigs/"
+STEP_PROSE_DIR =                          RESULTS + "018_prose/"
+STEP_QUARTO_DIR =                         RESULTS + "reports/"
+
+# ********** directories for built references **********
+STEP_BOWTIE2_REFERENCE_DIR =    GENOME_DIR + "bowtie2_reference/"
+
+# ********** read samples/contrasts **********
+samples_df = pd.read_csv(SAMPLESHEET_CSV_PATH).set_index("sample", drop=False)
+SAMPLES = samples_df["sample"].tolist()
+SAMPLE_MARK = samples_df["mark"].to_dict()
+
+CONTRASTS = pd.read_csv(CONTRASTS_CSV_PATH)
+CONTRAST_NAMES = [
+    f"{row.treatment}_vs_{row.control}"
+    for row in CONTRASTS.itertuples()
+]
+
+# ********** genome info **********
+# The reference FASTA and GTF are auto-detected from the genome_dir, which must
+# contain exactly one FASTA (.fa/.fasta/.fna) and exactly one GTF (.gtf).
+def _get_reference_file(directory, extensions, label):
+    matches = sorted({
+        f
+        for ext in extensions
+        for f in glob(os.path.join(directory, "*" + ext))
+    })
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one {label} file in genome_dir '{directory}', "
+            f"but found {len(matches)}: {matches or 'none'}"
+        )
+    return matches[0]
+
+GENOME_FASTA = _get_reference_file(GENOME_DIR, (".fa", ".fasta", ".fna"), "FASTA (.fa/.fasta/.fna)")
+GTF = _get_reference_file(GENOME_DIR, (".gtf",), "GTF (.gtf)")
+
+
+
+
+IGG_CONTROL = (
+    pd.read_csv(IGG_CONTROLS_CSV_PATH).set_index("sample")["igg_control"].to_dict()
+)
+
+# Marks that should be called in --broad mode in GoPeaks
+# TODO: move to .csv or config.yml
+BROAD_MARKS = {"H3K4me1", "H3K27ac", "H3K27me3"}
+
+# targets are everything we actually call peaks on (i.e., exclude IgG samples)
+# TODO: don't hardcode IgG here
+PEAK_SAMPLES = [s for s in SAMPLES if SAMPLE_MARK[s] != "IgG"]
+
+DESEQ_SYMBOL_FILES = ["normalized_counts"] + CONTRAST_NAMES # i.e., excludes size factor .csv
+CONTROL_CONDITIONS = sorted(CONTRASTS["control"].unique().tolist())
+
+# samples to drop
+EXCLUDE = pd.read_csv(EXCLUDE_CSV_PATH) if EXCLUDE_CSV_PATH else \
+        pd.DataFrame(columns=["sample", "reason"])
+
+# discover Quarto .qmd docs
+QMD_FILES = glob(os.path.join(REPORTS_DIR, "**", "*.qmd"), recursive=True)
+QUARTO_HTML_FILES = [os.path.dirname(f) + "/output/" + os.path.splitext(os.path.basename(f))[0] + ".html" for f in QMD_FILES]
+
+
+# ********** helpers for fastp **********
+def get_r1(wildcards):
+    return os.path.normpath(os.path.join(CONFIG_DIR, samples_df.loc[wildcards.sample, "r1"]))
+
+def get_r2(wildcards):
+    return os.path.normpath(os.path.join(CONFIG_DIR, samples_df.loc[wildcards.sample, "r2"]))
+
+# ********** helpers for dropping samples **********
+def get_excluded_samples():
+    """All samples listed in the exclude table, de-duplicated."""
+    return EXCLUDE["sample"].dropna().astype(str).drop_duplicates().tolist()
+
+# ********** helpers for gopeaks **********
+def get_target_bam(wildcards):
+    return f"{STEP_FILTERED_READS_DIR}{SAMPLE_MARK[wildcards.sample]}/{wildcards.sample}.filtered.bam"
+
+def get_igg_control_bam(wildcards):
+    igg = IGG_CONTROL.get(wildcards.sample)
+    if igg is None:
+        raise ValueError(f"No IgG control mapped for sample {wildcards.sample!r} in igg_controls.csv")
+    return f"{STEP_FILTERED_READS_DIR}{SAMPLE_MARK[igg]}/{igg}.filtered.bam"
+
+def gopeaks_broad_flag(wildcards):
+    # see https://github.com/maxsonBraunLab/gopeaks , "Recommended parameters" section
+    return "--broad --mdist 3000" if SAMPLE_MARK[wildcards.sample] in BROAD_MARKS else ""
+
+
+
+############# rule all #############
+rule all:
+    input:
+        STEP_MULTIQC_DIR + "multiqc_report.html",
+
+############# Step 1: Fastp trimming #############
+rule fastp:
+    input:
+        r1=get_r1,
+        r2=get_r2,
+    output:
+        r1=STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
+        r2=STEP_FASTP_DIR + "{mark}/{sample}_R2.fastq",
+        html=STEP_FASTP_DIR + "{mark}/{sample}.fastp.html",
+        json=STEP_FASTP_DIR + "{mark}/{sample}.fastp.json",
+    conda:
+        "envs/fastp.yml"
+    log:
+        LOGS + Path(STEP_FASTP_DIR).name + "/{mark}/{sample}.log"
+    shell:
+        """
+        fastp \
+            --in1 {input.r1} \
+            --in2 {input.r2} \
+            --out1 {output.r1} \
+            --out2 {output.r2} \
+            --html {output.html} \
+            --json {output.json} \
+            --thread 1 \
+            --detect_adapter_for_pe \
+            &> {log}
+        """
+
+############# Step 2: FastQC of trimmed reads #############
+rule fastqc_trimmed:
+    input:
+        r1=STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
+        r2=STEP_FASTP_DIR + "{mark}/{sample}_R2.fastq",
+    output:
+        r1_html=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.html",
+        r1_zip=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.zip",
+        r2_html=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R2_fastqc.html",
+        r2_zip=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R2_fastqc.zip",
+    params:
+        outdir=STEP_FASTQC_POST_TRIM_DIR + "{mark}"
+    threads:
+        2  # FastQC uses one thread per input file (R1, R2); more is wasted
+    conda:
+        "envs/fastqc.yml"
+    log:
+        LOGS + Path(STEP_FASTQC_POST_TRIM_DIR).name + "/{mark}/{sample}.log"
+    shell:
+        """
+        mkdir -p {params.outdir}
+        fastqc -o {params.outdir} --threads {threads} {input.r1} {input.r2} &> {log}
+        """
+
+############# Step 3: Alignment with bowtie2 #############
+
+# Prepare bowtie2 reference
+rule bowtie2_prepare_reference:
+    input:
+        fasta=GENOME_FASTA,
+    output:
+        idx=multiext(
+            STEP_BOWTIE2_REFERENCE_DIR + "bowtie2_reference",
+            ".1.bt2l", ".2.bt2l", ".3.bt2l", ".4.bt2l", ".rev.1.bt2l", ".rev.2.bt2l",
+        ),
+    params:
+        ref_prefix=STEP_BOWTIE2_REFERENCE_DIR + "bowtie2_reference",
+    threads:
+        CORES
+    conda:
+        "envs/bowtie2.yml"
+    log:
+        LOGS + Path(STEP_BOWTIE2_DIR).name + "/bowtie2_prepare_reference/prepare.log"
+    shell:
+        """
+        bowtie2-build \
+            --large-index \
+            --threads {threads} \
+            {input.fasta} \
+            {params.ref_prefix} \
+            &> {log}
+        """
+
+# perform the alignment
+rule bowtie2_alignment:
+    input:
+        r1=STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
+        r2=STEP_FASTP_DIR + "{mark}/{sample}_R2.fastq",
+        idx=multiext(
+            STEP_BOWTIE2_REFERENCE_DIR + "bowtie2_reference",
+            ".1.bt2l", ".2.bt2l", ".3.bt2l", ".4.bt2l", ".rev.1.bt2l", ".rev.2.bt2l",
+        ),
+    output:
+        bam=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam",
+        bai=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam.bai",
+        summary=STEP_BOWTIE2_DIR + "{mark}/{sample}.bowtie2.log",
+        sam=temp(STEP_BOWTIE2_DIR + "{mark}/{sample}.sam"),
+    params:
+        ref_prefix=STEP_BOWTIE2_REFERENCE_DIR + "bowtie2_reference",
+    threads:
+        CORES
+    conda:
+        "envs/bowtie2.yml"
+    log:
+        LOGS + Path(STEP_BOWTIE2_DIR).name + "/{mark}/{sample}.log"
+    shell:
+        """
+        # run bowtie2 (outputs to .sam)
+        bowtie2 \
+            --end-to-end \
+            --very-sensitive \
+            --no-mixed \
+            --no-discordant \
+            --phred33 \
+            -I 10 \
+            -X 700 \
+            -p {threads} \
+            -x {params.ref_prefix} \
+            -1 {input.r1} -2 {input.r2} \
+            -S {output.sam} \
+            &> {log}
+
+        # convert .sam to .bam and sort the reads
+        samtools sort -@ {threads} -o {output.bam} {output.sam}
+
+        # index the .bam
+        samtools index {output.bam}
+
+        # copy the log file to output dir for MultiQC report
+        cp {log} {output.summary}
+        """
+
+############# Removing duplicate reads could go here. might be good for samples with >20% duplication. #############
+
+############# Step 4: Filter by mapping quality, proper pairs, fragment length #############
+rule filter_bam:
+    input:
+        bam=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam",
+        bai=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam.bai",
+    output:
+        bam=STEP_FILTERED_READS_DIR + "{mark}/{sample}.filtered.bam",
+        bai=STEP_FILTERED_READS_DIR + "{mark}/{sample}.filtered.bam.bai",
+    params:
+        min_q=2,
+        max_frag=1000,
+    conda:
+        "envs/bowtie2.yml"
+    log:
+        LOGS + Path(STEP_FILTERED_READS_DIR).name + "/{mark}/{sample}.log",
+    shell:
+        """
+        # -f 0x2                              -- properly paired (both mates mapped, correct orientation)
+        # -q                                  -- minimum MAPQ quality
+        # -e tlen ...                         -- only keeps inserts < max_frag length
+
+        samtools view \
+            --bam \
+            -f 0x2 \
+            -q {params.min_q} \
+            -e 'tlen > -{params.max_frag} && tlen < {params.max_frag}' \
+            --threads 1 \
+            --output {output.bam} \
+            {input.bam} \
+            &> {log}
+
+        samtools index {output.bam} &>> {log}
+        """
+
+############# Step 5: Peak detection with GoPeaks #############
+rule gopeaks:
+    input:
+        bam=get_target_bam,
+        control=get_igg_control_bam,
+    output:
+        peaks=STEP_GOPEAKS_DIR + "{mark}/{sample}_peaks.bed",
+        json=STEP_GOPEAKS_DIR + "{mark}/{sample}_gopeaks.json",
+    params:
+        prefix=STEP_GOPEAKS_DIR + "{mark}/{sample}",
+        broad=gopeaks_broad_flag,
+    conda:
+        "envs/gopeaks.yml"
+    log:
+        LOGS + Path(STEP_GOPEAKS_DIR).name + "/{mark}/{sample}.log",
+    shell:
+        """
+        gopeaks \
+            --bam {input.bam} \
+            --control {input.control} \
+            --prefix {params.prefix} \
+            {params.broad} \
+            &> {log}
+        """
+
+############# Step 6: Generate MultiQC report #############
+rule multiqc:
+    input:
+        fastqc=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.html",
+        bowtie2=STEP_BOWTIE2_DIR + "{mark}/{sample}.bowtie2.log",
+        gopeaks=STEP_GOPEAKS_DIR + "{mark}/{sample}_gopeaks.json",
+    output:
+        html=STEP_MULTIQC_DIR + "multiqc_report.html",
+    params:
+        scan_dirs=" ".join([
+            STEP_FASTP_DIR,
+            STEP_FASTQC_POST_TRIM_DIR,
+            STEP_BOWTIE2_DIR,
+            STEP_GOPEAKS_DIR,
+        ]),
+        outdir=STEP_MULTIQC_DIR,
+    conda:
+        "envs/multiqc.yml"
+    log:
+        LOGS + Path(STEP_MULTIQC_DIR).name + "/multiqc.log",
+    shell:
+        """
+        multiqc \
+            --force \
+            --outdir {params.outdir} \
+            --filename multiqc_report.html \
+            {params.scan_dirs} \
+            &> {log}
+        """
+
+
+
+############# Step 7: Build consensus peak .bed for each mark #############
+
+############# Step 8: Annotate consensus peak .bed files #############
+
+############# Step 9: QC and reproducibility plots and reports #############
+# - Assess mapped fragment size distribution
+# - Pearson correlation of the log2-transformed values of read counts 
+# - Number of peaks called
+# - FRiPs
+# - jaccard index
+
+############# Step 10: Build raw count matrix for each mark #############
+
+############# Step 11: Drop samples #############
+
+############# Step 12: Remove low-count genes #############
+
+############# Step 13: PCA (all samples) #############
+
+############# Step 14: PCA (samples dropped) #############
+
+############# Step 15: Differential analysis with DESeq2 #############
+
+############# Step 16: Convert DESeq2 outputs to gene symbols #############
+
+############# Step 17: Write BigWig with scale factors computed by DESeq2 (for visualization in IGV) #############
+
+############# Step 18: Prose #############
+
+############# Last step: Re-generate user-defined Quarto reports #############

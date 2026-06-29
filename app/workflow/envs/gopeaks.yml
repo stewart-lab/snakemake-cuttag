@@ -1,0 +1,6 @@
+name: fastqc
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - gopeaks=1.0.0

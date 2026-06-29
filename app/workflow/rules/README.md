@@ -1,0 +1,1 @@
+for now all rules are in the Snakefile, but in the future rules can go here
