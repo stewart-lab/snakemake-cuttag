@@ -98,7 +98,7 @@ def main():
         "--use-conda",
         "--configfile", config_yaml,
         "--cores", str(cores),
-        "--forcerun", "render_quarto",
+        # "--forcerun", "render_quarto",
     ])
     if result.returncode != 0:
         print(f"Error: snakemake failed with exit code {result.returncode}")

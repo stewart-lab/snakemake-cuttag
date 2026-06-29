@@ -1,4 +1,4 @@
-name: fastqc
+name: gopeaks
 channels:
   - conda-forge
   - bioconda

@@ -161,6 +161,8 @@ rule fastp:
         json=STEP_FASTP_DIR + "{mark}/{sample}.fastp.json",
     conda:
         "envs/fastp.yml"
+    threads:
+        1
     log:
         LOGS + Path(STEP_FASTP_DIR).name + "/{mark}/{sample}.log"
     shell:
@@ -172,7 +174,7 @@ rule fastp:
             --out2 {output.r2} \
             --html {output.html} \
             --json {output.json} \
-            --thread 1 \
+            --thread {threads} \
             --detect_adapter_for_pe \
             &> {log}
         """
