@@ -345,9 +345,28 @@ rule gopeaks:
 ############# Step 6: Generate MultiQC report #############
 rule multiqc:
     input:
-        fastqc=STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.html",
-        bowtie2=STEP_BOWTIE2_DIR + "{mark}/{sample}.bowtie2.log",
-        gopeaks=STEP_GOPEAKS_DIR + "{mark}/{sample}_gopeaks.json",
+        # MultiQC aggregates across all samples, so these inputs must be
+        # collected over every sample (not left as per-sample wildcards, which
+        # cannot be resolved from the wildcard-free output). fastqc/bowtie2 run
+        # on all samples; gopeaks runs only on PEAK_SAMPLES (IgG has no peaks).
+        fastqc=expand(
+            STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.html",
+            zip,
+            mark=[SAMPLE_MARK[s] for s in SAMPLES],
+            sample=SAMPLES,
+        ),
+        bowtie2=expand(
+            STEP_BOWTIE2_DIR + "{mark}/{sample}.bowtie2.log",
+            zip,
+            mark=[SAMPLE_MARK[s] for s in SAMPLES],
+            sample=SAMPLES,
+        ),
+        gopeaks=expand(
+            STEP_GOPEAKS_DIR + "{mark}/{sample}_gopeaks.json",
+            zip,
+            mark=[SAMPLE_MARK[s] for s in PEAK_SAMPLES],
+            sample=PEAK_SAMPLES,
+        ),
     output:
         html=STEP_MULTIQC_DIR + "multiqc_report.html",
     params:
