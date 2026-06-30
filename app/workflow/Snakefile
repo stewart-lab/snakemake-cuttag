@@ -165,6 +165,7 @@ rule all:
     input:
         STEP_MULTIQC_DIR + "multiqc_report.html",
         expand(STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed", mark=PEAK_MARKS),
+        expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.bed", mark=PEAK_MARKS),
         expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.tsv", mark=PEAK_MARKS),
 
 ############# Step 1: Fastp trimming #############
@@ -446,6 +447,7 @@ rule annotate_consensus_peaks:
         peaks=STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed",
         gtf=GTF,
     output:
+        bed=STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.bed",
         tsv=STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.tsv",
     conda:
         "envs/chipseeker.yml"
@@ -456,7 +458,8 @@ rule annotate_consensus_peaks:
         Rscript scripts/annotate_consensus_peaks.R \
             --peaks {input.peaks} \
             --gtf {input.gtf} \
-            --output {output.tsv} \
+            --bed {output.bed} \
+            --tsv {output.tsv} \
             &> {log}
         """
 
