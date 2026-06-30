@@ -164,9 +164,7 @@ def get_mark_peak_beds(wildcards):
 rule all:
     input:
         STEP_MULTIQC_DIR + "multiqc_report.html",
-        expand(STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed", mark=PEAK_MARKS),
         expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.bed", mark=PEAK_MARKS),
-        expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.tsv", mark=PEAK_MARKS),
 
 ############# Step 1: Fastp trimming #############
 rule fastp_trim:
@@ -337,7 +335,7 @@ rule samtools_filter_reads:
         """
 
 ############# Step 5: Peak detection with GoPeaks #############
-rule gopeaks:
+rule gopeaks_call_peaks:
     input:
         bam=get_target_bam,
         control=get_igg_control_bam,
@@ -415,11 +413,7 @@ rule multiqc:
 
 
 ############# Step 7: Build consensus peak .bed for each mark #############
-# A peak is kept if it is observed in at least CONSENSUS_MIN_SAMPLES of the
-# samples for that mark. We use `bedtools multiinter` to count, per interval,
-# how many samples overlap it, threshold on that count, then `bedtools merge`
-# the surviving intervals into a single consensus .bed.
-rule consensus_peaks:
+rule call_consensus_peaks:
     input:
         beds=get_mark_peak_beds,
     output:
@@ -440,8 +434,6 @@ rule consensus_peaks:
         """
 
 ############# Step 8: Annotate consensus peak .bed files #############
-# Annotate each mark's consensus peaks against the reference GTF with
-# ChIPseeker: per-peak genomic feature class, nearest gene, and distance to TSS.
 rule annotate_consensus_peaks:
     input:
         peaks=STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed",
