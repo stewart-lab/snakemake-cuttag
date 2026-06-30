@@ -7,6 +7,8 @@ peaks it contains. Built with plotly.
 
 Each cell is drawn as a real unit square (a filled path) whose corners are
 rotated 45 degrees, so neighbouring cells share corners and tile exactly.
+
+Layout (left to right): rotated triangular matrix, peak-count bars, sample names.
 """
 import os
 import math
@@ -14,21 +16,14 @@ import argparse
 
 import numpy as np
 import pybedtools
-import plotly.colors as pcolors
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from plotly.colors import sample_colorscale
 
 SQRT2 = math.sqrt(2.0)
 
-
-def reversed_rdbu():
-    """RdBu reversed so low Jaccard is blue and high Jaccard is red."""
-    scale = pcolors.get_colorscale("RdBu")
-    return [[1.0 - position, color] for position, color in scale][::-1]
-
-
-COLORSCALE = reversed_rdbu()
+# Blues runs light (low Jaccard) -> dark (high Jaccard), which is what we want.
+COLORSCALE = "Blues"
 
 
 def rotate(x, y):
@@ -49,17 +44,22 @@ def compute_jaccard_matrix(bed_paths):
             except Exception:
                 # undefined (e.g. an empty peak set) -> treat as no overlap
                 jaccard = 0.0
+            if np.isnan(jaccard):
+                jaccard = 0.0
             matrix[row, col] = jaccard
             matrix[col, row] = jaccard
     return matrix
 
 
 def count_peaks(bed_paths):
-    """Number of peaks (non-empty lines) in each .bed file."""
+    """Number of peaks (data lines) in each .bed file, ignoring headers."""
     counts = []
     for path in bed_paths:
         with open(path) as handle:
-            counts.append(sum(1 for line in handle if line.strip()))
+            counts.append(sum(
+                1 for line in handle
+                if line.strip() and not line.startswith(("#", "track", "browser"))
+            ))
     return counts
 
 
@@ -68,7 +68,7 @@ def build_figure(matrix, labels, peak_counts, mark):
 
     fig = make_subplots(
         rows=1, cols=2, shared_yaxes=True,
-        column_widths=[0.74, 0.26], horizontal_spacing=0.03,
+        column_widths=[0.5, 0.5], horizontal_spacing=0.06,
     )
 
     # one filled, rotated unit square per lower-triangle cell (exact tiling)
@@ -103,7 +103,7 @@ def build_figure(matrix, labels, peak_counts, mark):
                 colorbar=dict(
                     title=dict(text="Jaccard statistic", side="top"),
                     orientation="h", x=0.0, xanchor="left",
-                    y=-0.04, yanchor="top", len=0.4, thickness=14,
+                    y=-0.06, yanchor="top", len=0.4, thickness=14,
                 ),
                 showscale=True,
             ),
@@ -118,19 +118,25 @@ def build_figure(matrix, labels, peak_counts, mark):
         go.Bar(
             x=peak_counts, y=diagonal_y, orientation="h",
             marker=dict(color="lightskyblue"),
-            text=peak_counts, textposition="outside",
+            text=peak_counts, textposition="inside", insidetextanchor="start",
             hovertemplate="%{x} peaks<extra></extra>", showlegend=False,
         ),
         row=1, col=2,
     )
 
-    # equal aspect keeps the rotated squares square; col2 shares this y-axis
+    # matrix axis: keep the rotated squares square, no text labels here
     fig.update_yaxes(
         scaleanchor="x", scaleratio=1,
-        tickmode="array", tickvals=diagonal_y, ticktext=labels,
+        showticklabels=False,
         showgrid=False, zeroline=False, row=1, col=1,
     )
     fig.update_xaxes(visible=False, row=1, col=1)
+
+    # bars in the middle; sample names on the right edge of the bar axis
+    fig.update_yaxes(
+        tickmode="array", tickvals=diagonal_y, ticktext=labels,
+        side="right", showgrid=False, zeroline=False, row=1, col=2,
+    )
     fig.update_xaxes(
         title_text="Number of peaks", rangemode="tozero",
         showgrid=False, row=1, col=2,
@@ -140,7 +146,7 @@ def build_figure(matrix, labels, peak_counts, mark):
         title=f"Peak-set Jaccard similarity: {mark}",
         plot_bgcolor="white",
         width=820, height=max(500, 42 * n),
-        bargap=0.45, margin=dict(l=20, r=20, t=60, b=90),
+        bargap=0.45, margin=dict(l=20, r=20, t=60, b=110),
     )
     return fig
 
@@ -176,7 +182,8 @@ def main():
     figure = build_figure(matrix, args.labels, peak_counts, args.mark)
 
     figure.write_html(args.output_html)
-    figure.write_image(args.output_png)
+    # Kaleido has no DPI arg; default is 96 DPI, so scale to reach 300 DPI.
+    figure.write_image(args.output_png, scale=300 / 96)
     print(f"Wrote Jaccard QC plot for {args.mark}: {args.output_png}")
 
 
