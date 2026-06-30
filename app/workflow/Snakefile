@@ -176,6 +176,18 @@ def get_jaccard_labels(wildcards):
     """Row labels matching get_jaccard_beds order (samples, then consensus)."""
     return get_mark_samples(wildcards) + ["consensus"]
 
+# ********** helpers for the raw count matrix **********
+def get_mark_filtered_bams(wildcards):
+    """Filtered .bam files for a given mark's samples, in samplesheet order."""
+    return [
+        f"{STEP_FILTERED_READS_DIR}{wildcards.mark}/{s}.filtered.bam"
+        for s in get_mark_samples(wildcards)
+    ]
+
+def get_mark_filtered_bais(wildcards):
+    """Indexes for get_mark_filtered_bams (multicov requires indexed bams)."""
+    return [bam + ".bai" for bam in get_mark_filtered_bams(wildcards)]
+
 
 
 ############# rule all #############
@@ -184,6 +196,7 @@ rule all:
         STEP_MULTIQC_DIR + "multiqc_report.html",
         expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.bed", mark=PEAK_MARKS),
         expand(STEP_QC_REPORT_CARDS_DIR + "{mark}.jaccard.png", mark=PEAK_MARKS),
+        expand(STEP_RAW_COUNT_MATRIX_DIR + "{mark}.raw_counts.csv", mark=PEAK_MARKS),
 
 ############# Step 1: Fastp trimming #############
 rule fastp_trim:
@@ -509,6 +522,31 @@ rule jaccard_qc:
         """
 
 ############# Step 10: Build raw count matrix for each mark #############
+# For each mark, count how many reads from each sample's filtered .bam overlap
+# each consensus peak (bedtools multicov), producing a peaks-by-samples matrix
+# of raw integer counts. Sample columns are in samplesheet order.
+rule build_count_matrix:
+    input:
+        peaks=STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed",
+        bams=get_mark_filtered_bams,
+        bais=get_mark_filtered_bais,
+    output:
+        matrix=STEP_RAW_COUNT_MATRIX_DIR + "{mark}.raw_counts.csv",
+    params:
+        samples=lambda wildcards: " ".join(get_mark_samples(wildcards)),
+    conda:
+        "envs/bedtools.yml"
+    log:
+        LOGS + Path(STEP_RAW_COUNT_MATRIX_DIR).name + "/{mark}.log",
+    shell:
+        """
+        python scripts/build_count_matrix.py \
+            --peaks {input.peaks} \
+            --bams {input.bams} \
+            --samples {params.samples} \
+            --output {output.matrix} \
+            &> {log}
+        """
 
 ############# Step 11: Drop samples #############
 
