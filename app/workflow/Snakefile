@@ -150,7 +150,7 @@ rule all:
         STEP_MULTIQC_DIR + "multiqc_report.html",
 
 ############# Step 1: Fastp trimming #############
-rule fastp:
+rule fastp_trim:
     input:
         r1=get_r1,
         r2=get_r2,
@@ -180,7 +180,7 @@ rule fastp:
         """
 
 ############# Step 2: FastQC of trimmed reads #############
-rule fastqc_trimmed:
+rule fastqc:
     input:
         r1=STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
         r2=STEP_FASTP_DIR + "{mark}/{sample}_R2.fastq",
@@ -233,7 +233,7 @@ rule bowtie2_prepare_reference:
         """
 
 # perform the alignment
-rule bowtie2_alignment:
+rule bowtie2_align:
     input:
         r1=STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
         r2=STEP_FASTP_DIR + "{mark}/{sample}_R2.fastq",
@@ -284,7 +284,7 @@ rule bowtie2_alignment:
 ############# Removing duplicate reads could go here. might be good for samples with >20% duplication. #############
 
 ############# Step 4: Filter by mapping quality, proper pairs, fragment length #############
-rule filter_bam:
+rule samtools_filter_reads:
     input:
         bam=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam",
         bai=STEP_BOWTIE2_DIR + "{mark}/{sample}.sorted.bam.bai",
@@ -345,10 +345,12 @@ rule gopeaks:
 ############# Step 6: Generate MultiQC report #############
 rule multiqc:
     input:
-        # MultiQC aggregates across all samples, so these inputs must be
-        # collected over every sample (not left as per-sample wildcards, which
-        # cannot be resolved from the wildcard-free output). fastqc/bowtie2 run
-        # on all samples; gopeaks runs only on PEAK_SAMPLES (IgG has no peaks).
+        fastp=expand(
+            STEP_FASTP_DIR + "{mark}/{sample}_R1.fastq",
+            zip,
+            mark=[SAMPLE_MARK[s] for s in SAMPLES],
+            sample=SAMPLES,
+        ),
         fastqc=expand(
             STEP_FASTQC_POST_TRIM_DIR + "{mark}/{sample}_R1_fastqc.html",
             zip,
