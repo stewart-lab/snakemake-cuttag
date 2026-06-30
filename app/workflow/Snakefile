@@ -104,6 +104,13 @@ BROAD_MARKS = {"H3K4me1", "H3K27ac", "H3K27me3"}
 # TODO: don't hardcode IgG here
 PEAK_SAMPLES = [s for s in SAMPLES if SAMPLE_MARK[s] != "IgG"]
 
+# the distinct marks we build consensus peaks for (one consensus .bed per mark)
+PEAK_MARKS = sorted({SAMPLE_MARK[s] for s in PEAK_SAMPLES})
+
+# a peak must be observed in at least this many samples (per mark) to be kept in
+# that mark's consensus .bed. Capped per-mark at the number of samples available.
+CONSENSUS_MIN_SAMPLES = int(config.get("consensus_min_samples", 2))
+
 DESEQ_SYMBOL_FILES = ["normalized_counts"] + CONTRAST_NAMES # i.e., excludes size factor .csv
 CONTROL_CONDITIONS = sorted(CONTRASTS["control"].unique().tolist())
 
@@ -142,12 +149,22 @@ def gopeaks_broad_flag(wildcards):
     # see https://github.com/maxsonBraunLab/gopeaks , "Recommended parameters" section
     return "--broad --mdist 3000" if SAMPLE_MARK[wildcards.sample] in BROAD_MARKS else ""
 
+# ********** helpers for consensus peaks **********
+def get_mark_peak_beds(wildcards):
+    """All per-sample GoPeaks .bed files belonging to a given mark."""
+    return [
+        f"{STEP_GOPEAKS_DIR}{wildcards.mark}/{s}_peaks.bed"
+        for s in PEAK_SAMPLES
+        if SAMPLE_MARK[s] == wildcards.mark
+    ]
+
 
 
 ############# rule all #############
 rule all:
     input:
         STEP_MULTIQC_DIR + "multiqc_report.html",
+        expand(STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed", mark=PEAK_MARKS),
 
 ############# Step 1: Fastp trimming #############
 rule fastp_trim:
@@ -396,6 +413,50 @@ rule multiqc:
 
 
 ############# Step 7: Build consensus peak .bed for each mark #############
+# A peak is kept if it is observed in at least CONSENSUS_MIN_SAMPLES of the
+# samples for that mark. We use `bedtools multiinter` to count, per interval,
+# how many samples overlap it, threshold on that count, then `bedtools merge`
+# the surviving intervals into a single consensus .bed.
+rule consensus_peaks:
+    input:
+        beds=get_mark_peak_beds,
+    output:
+        bed=STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed",
+    params:
+        min_samples=CONSENSUS_MIN_SAMPLES,
+    conda:
+        "envs/bedtools.yml"
+    log:
+        LOGS + Path(STEP_CONSENSUS_PEAKS_DIR).name + "/{mark}.log",
+    shell:
+        """
+        mkdir -p $(dirname {output.bed})
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+
+        # bedtools multiinter requires each input sorted by chrom then start
+        sorted=()
+        for bed in {input.beds}; do
+            s="$tmpdir/$(basename "$bed").sorted"
+            sort -k1,1 -k2,2n "$bed" > "$s"
+            sorted+=("$s")
+        done
+
+        # cap the threshold at the number of samples available for this mark
+        n={params.min_samples}
+        if [ "$n" -gt "${{#sorted[@]}}" ]; then n="${{#sorted[@]}}"; fi
+        if [ "$n" -lt 1 ]; then n=1; fi
+
+        if [ "${{#sorted[@]}}" -eq 1 ]; then
+            # single sample for this mark: consensus is just its merged peaks
+            bedtools merge -i "${{sorted[0]}}"
+        else
+            bedtools multiinter -i "${{sorted[@]}}" \
+                | awk -v n="$n" '$4 >= n' \
+                | cut -f1-3 \
+                | bedtools merge -i -
+        fi > {output.bed} 2> {log}
+        """
 
 ############# Step 8: Annotate consensus peak .bed files #############
 
