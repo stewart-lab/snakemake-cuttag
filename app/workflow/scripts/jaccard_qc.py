@@ -4,14 +4,37 @@ Computes the pairwise Jaccard index between every peak .bed file for a mark
 (each sample's peaks plus the consensus peaks) and renders it as a triangular
 heatmap rotated 45 degrees, with a horizontal bar per file showing how many
 peaks it contains. Built with plotly.
+
+Each cell is drawn as a real unit square (a filled path) whose corners are
+rotated 45 degrees, so neighbouring cells share corners and tile exactly.
 """
 import os
+import math
 import argparse
 
 import numpy as np
 import pybedtools
+import plotly.colors as pcolors
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from plotly.colors import sample_colorscale
+
+SQRT2 = math.sqrt(2.0)
+
+
+def reversed_rdbu():
+    """RdBu reversed so low Jaccard is blue and high Jaccard is red."""
+    scale = pcolors.get_colorscale("RdBu")
+    return [[1.0 - position, color] for position, color in scale][::-1]
+
+
+COLORSCALE = reversed_rdbu()
+
+
+def rotate(x, y):
+    """Rotate a point 45 degrees so the self-diagonal becomes vertical, with
+    the first file at the top (y increases downward, hence the negated y)."""
+    return ((x - y) / SQRT2, -(x + y) / SQRT2)
 
 
 def compute_jaccard_matrix(bed_paths):
@@ -43,106 +66,81 @@ def count_peaks(bed_paths):
 def build_figure(matrix, labels, peak_counts, mark):
     n = len(labels)
 
-    # Rotate the lower triangle 45 degrees: cell (row, col) with row >= col maps
-    # to (x = col - row, y = row + col). The self-comparisons (row == col) land
-    # on x = 0 at y = 2*row, forming the vertical right edge of the triangle;
-    # the triangle fans out to the left.
-    xs, ys, values, hover = [], [], [], []
-    for row in range(n):
-        for col in range(row + 1):
-            xs.append(col - row)
-            ys.append(row + col)
-            values.append(matrix[row, col])
-            hover.append(f"{labels[row]} vs {labels[col]}: {matrix[row, col]:.3f}")
-
-    diagonal_y = [2 * index for index in range(n)]
-
-    # marker size (px) is approximate; scale it down as the matrix grows
-    marker_size = max(6, int(480 / (n + 1)))
-
     fig = make_subplots(
-        rows=1, cols=2, column_widths=[0.72, 0.28], horizontal_spacing=0.04
+        rows=1, cols=2, shared_yaxes=True,
+        column_widths=[0.74, 0.26], horizontal_spacing=0.03,
     )
 
-    # rotated-square heatmap cells
+    # one filled, rotated unit square per lower-triangle cell (exact tiling)
+    centers_x, centers_y, values, hover = [], [], [], []
+    for row in range(n):
+        for col in range(row + 1):
+            value = float(matrix[row, col])
+            corners = [(col, row), (col + 1, row), (col + 1, row + 1), (col, row + 1)]
+            rotated = [rotate(x, y) for x, y in corners]
+            path = "M {} L {} L {} L {} Z".format(
+                *(f"{px:.4f},{py:.4f}" for px, py in rotated)
+            )
+            fig.add_shape(
+                type="path", path=path,
+                fillcolor=sample_colorscale(COLORSCALE, [value])[0],
+                line=dict(color="white", width=0.5),
+                row=1, col=1,
+            )
+            center_x, center_y = rotate(col + 0.5, row + 0.5)
+            centers_x.append(center_x)
+            centers_y.append(center_y)
+            values.append(value)
+            hover.append(f"{labels[row]} vs {labels[col]}: {value:.3f}")
+
+    # transparent center markers carry both the colorbar and the hover labels
     fig.add_trace(
         go.Scatter(
-            x=xs,
-            y=ys,
-            mode="markers",
+            x=centers_x, y=centers_y, mode="markers",
             marker=dict(
-                symbol="diamond",
-                size=marker_size,
-                color=values,
-                colorscale="RdBu_r",
-                cmin=0.0,
-                cmax=1.0,
-                line=dict(width=0),
+                size=12, opacity=0.0,
+                color=values, colorscale=COLORSCALE, cmin=0.0, cmax=1.0,
                 colorbar=dict(
                     title=dict(text="Jaccard statistic", side="top"),
-                    orientation="h",
-                    x=0.0,
-                    xanchor="left",
-                    y=-0.02,
-                    yanchor="top",
-                    len=0.4,
-                    thickness=14,
+                    orientation="h", x=0.0, xanchor="left",
+                    y=-0.04, yanchor="top", len=0.4, thickness=14,
                 ),
                 showscale=True,
             ),
-            text=hover,
-            hoverinfo="text",
-            showlegend=False,
+            text=hover, hoverinfo="text", showlegend=False,
         ),
-        row=1,
-        col=1,
-    )
-
-    # one bar per file: number of peaks
-    fig.add_trace(
-        go.Bar(
-            x=peak_counts,
-            y=diagonal_y,
-            orientation="h",
-            marker=dict(color="lightskyblue"),
-            text=peak_counts,
-            textposition="outside",
-            hovertemplate="%{x} peaks<extra></extra>",
-            showlegend=False,
-        ),
-        row=1,
-        col=2,
-    )
-
-    # share the vertical extent; first file at the top (reversed range)
-    y_range = [2 * (n - 1) + 1, -1]
-    fig.update_yaxes(
-        range=y_range, showticklabels=False, showgrid=False, zeroline=False,
         row=1, col=1,
     )
-    fig.update_xaxes(
-        showticklabels=False, showgrid=False, zeroline=False, row=1, col=1,
-    )
-    fig.update_yaxes(
-        range=y_range,
-        tickmode="array",
-        tickvals=diagonal_y,
-        ticktext=labels,
-        side="left",
-        showgrid=False,
+
+    # diagonal-cell y positions (one per file) for bar + label alignment
+    diagonal_y = [rotate(index + 0.5, index + 0.5)[1] for index in range(n)]
+    fig.add_trace(
+        go.Bar(
+            x=peak_counts, y=diagonal_y, orientation="h",
+            marker=dict(color="lightskyblue"),
+            text=peak_counts, textposition="outside",
+            hovertemplate="%{x} peaks<extra></extra>", showlegend=False,
+        ),
         row=1, col=2,
     )
+
+    # equal aspect keeps the rotated squares square; col2 shares this y-axis
+    fig.update_yaxes(
+        scaleanchor="x", scaleratio=1,
+        tickmode="array", tickvals=diagonal_y, ticktext=labels,
+        showgrid=False, zeroline=False, row=1, col=1,
+    )
+    fig.update_xaxes(visible=False, row=1, col=1)
     fig.update_xaxes(
-        title_text="Number of peaks", rangemode="tozero", row=1, col=2,
+        title_text="Number of peaks", rangemode="tozero",
+        showgrid=False, row=1, col=2,
     )
 
     fig.update_layout(
         title=f"Peak-set Jaccard similarity: {mark}",
         plot_bgcolor="white",
-        width=820,
-        height=max(420, 55 * n),
-        bargap=0.45,
-        margin=dict(l=20, r=20, t=60, b=90),
+        width=820, height=max(500, 42 * n),
+        bargap=0.45, margin=dict(l=20, r=20, t=60, b=90),
     )
     return fig
 
