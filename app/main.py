@@ -52,11 +52,6 @@ def main():
     for subdir in subdirs:
         src_subdir = os.path.join("/app/workflow", subdir)
         dst_subdir = os.path.join(workflow_dir, subdir)
-
-        # an optional subdir (e.g. scripts/) may not ship in the container
-        if not os.path.isdir(src_subdir):
-            continue
-
         os.makedirs(dst_subdir, exist_ok=True)
 
         for src_file in os.listdir(src_subdir):

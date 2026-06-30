@@ -428,8 +428,14 @@ rule consensus_peaks:
         "envs/bedtools.yml"
     log:
         LOGS + Path(STEP_CONSENSUS_PEAKS_DIR).name + "/{mark}.log",
-    script:
-        "scripts/build_consensus_peaks.py"
+    shell:
+        """
+        python scripts/build_consensus_peaks.py \
+            --beds {input.beds} \
+            --output {output.bed} \
+            --min-samples {params.min_samples} \
+            &> {log}
+        """
 
 ############# Step 8: Annotate consensus peak .bed files #############
 
