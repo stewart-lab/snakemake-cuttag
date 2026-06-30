@@ -428,35 +428,8 @@ rule consensus_peaks:
         "envs/bedtools.yml"
     log:
         LOGS + Path(STEP_CONSENSUS_PEAKS_DIR).name + "/{mark}.log",
-    shell:
-        """
-        mkdir -p $(dirname {output.bed})
-        tmpdir=$(mktemp -d)
-        trap 'rm -rf "$tmpdir"' EXIT
-
-        # bedtools multiinter requires each input sorted by chrom then start
-        sorted=()
-        for bed in {input.beds}; do
-            s="$tmpdir/$(basename "$bed").sorted"
-            sort -k1,1 -k2,2n "$bed" > "$s"
-            sorted+=("$s")
-        done
-
-        # cap the threshold at the number of samples available for this mark
-        n={params.min_samples}
-        if [ "$n" -gt "${{#sorted[@]}}" ]; then n="${{#sorted[@]}}"; fi
-        if [ "$n" -lt 1 ]; then n=1; fi
-
-        if [ "${{#sorted[@]}}" -eq 1 ]; then
-            # single sample for this mark: consensus is just its merged peaks
-            bedtools merge -i "${{sorted[0]}}"
-        else
-            bedtools multiinter -i "${{sorted[@]}}" \
-                | awk -v n="$n" '$4 >= n' \
-                | cut -f1-3 \
-                | bedtools merge -i -
-        fi > {output.bed} 2> {log}
-        """
+    script:
+        "scripts/build_consensus_peaks.py"
 
 ############# Step 8: Annotate consensus peak .bed files #############
 
