@@ -1,0 +1,11 @@
+name: chipseeker
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base=4.5.3
+  - r-optparse=1.8.2
+  # chipseeker/txdbmaker left unpinned so conda resolves the build matching
+  # r-base 4.5.3 (Bioconductor 3.21); makeTxDbFromGFF lives in txdbmaker now
+  - bioconductor-chipseeker
+  - bioconductor-txdbmaker
