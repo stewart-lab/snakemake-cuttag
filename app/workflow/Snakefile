@@ -158,6 +158,24 @@ def get_mark_peak_beds(wildcards):
         if SAMPLE_MARK[s] == wildcards.mark
     ]
 
+# ********** helpers for jaccard QC **********
+def get_mark_samples(wildcards):
+    """Sample names for a given mark, in samplesheet order."""
+    return [s for s in PEAK_SAMPLES if SAMPLE_MARK[s] == wildcards.mark]
+
+def get_jaccard_beds(wildcards):
+    """Per-sample peak .bed files plus the consensus .bed, for a given mark."""
+    sample_beds = [
+        f"{STEP_GOPEAKS_DIR}{wildcards.mark}/{s}_peaks.bed"
+        for s in get_mark_samples(wildcards)
+    ]
+    consensus_bed = f"{STEP_CONSENSUS_PEAKS_DIR}{wildcards.mark}.consensus.bed"
+    return sample_beds + [consensus_bed]
+
+def get_jaccard_labels(wildcards):
+    """Row labels matching get_jaccard_beds order (samples, then consensus)."""
+    return get_mark_samples(wildcards) + ["consensus"]
+
 
 
 ############# rule all #############
@@ -167,6 +185,7 @@ rule all:
         expand(STEP_CONSENSUS_PEAKS_DIR + "{mark}.consensus.bed", mark=PEAK_MARKS),
         expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.bed", mark=PEAK_MARKS),
         expand(STEP_CONSENSUS_PEAKS_ANNOTATED_DIR + "{mark}.consensus.annotated.tsv", mark=PEAK_MARKS),
+        expand(STEP_QC_REPORT_CARDS_DIR + "{mark}.jaccard.png", mark=PEAK_MARKS),
 
 ############# Step 1: Fastp trimming #############
 rule fastp_trim:
@@ -466,10 +485,36 @@ rule annotate_consensus_peaks:
 
 ############# Step 9: QC and reproducibility plots and reports #############
 # - Assess mapped fragment size distribution
-# - Pearson correlation of the log2-transformed values of read counts 
+# - Pearson correlation of the log2-transformed values of read counts
 # - Number of peaks called
 # - FRiPs
 # - jaccard index
+
+# Per-mark pairwise Jaccard similarity across every peak file (each sample's
+# peaks + the consensus), drawn as a 45-degree-rotated triangular heatmap with
+# per-file peak counts as bars alongside.
+rule jaccard_qc:
+    input:
+        beds=get_jaccard_beds,
+    output:
+        png=STEP_QC_REPORT_CARDS_DIR + "{mark}.jaccard.png",
+        html=STEP_QC_REPORT_CARDS_DIR + "{mark}.jaccard.html",
+    params:
+        labels=lambda wildcards: " ".join(get_jaccard_labels(wildcards)),
+    conda:
+        "envs/jaccard_qc.yml"
+    log:
+        LOGS + Path(STEP_QC_REPORT_CARDS_DIR).name + "/{mark}.log",
+    shell:
+        """
+        python scripts/jaccard_qc.py \
+            --beds {input.beds} \
+            --labels {params.labels} \
+            --mark {wildcards.mark} \
+            --output-png {output.png} \
+            --output-html {output.html} \
+            &> {log}
+        """
 
 ############# Step 10: Build raw count matrix for each mark #############
 
